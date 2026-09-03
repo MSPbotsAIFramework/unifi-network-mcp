@@ -10,7 +10,7 @@ import json
 import pytest
 from mcp.server.fastmcp import FastMCP
 
-from unifi_network_mcp.api_client import UniFiClient, UniFiError, _normalize_base_url
+from unifi_network_mcp.api_client import UniFiClient, UniFiError
 from unifi_network_mcp.config import Settings
 from unifi_network_mcp.server import create_mcp_server
 
@@ -85,40 +85,11 @@ def test_error_envelope_mapping(status_code, expected_code, expected_retryable):
     assert envelope["error"]["message"] == "boom"
 
 
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        ("203.0.113.5", "https://203.0.113.5"),
-        ("203.0.113.5:8443", "https://203.0.113.5:8443"),
-        ("https://unifi.example.com", "https://unifi.example.com"),
-        ("https://unifi.example.com/", "https://unifi.example.com"),
-        ("http://203.0.113.5:8443", "http://203.0.113.5:8443"),
-    ],
-)
-def test_normalize_base_url_handles_bare_host_and_full_url(raw, expected):
-    assert _normalize_base_url(raw) == expected
-
-
-def test_client_direct_mode_base_url():
-    client = UniFiClient("test-key", host="203.0.113.5")
-    assert client._base_url == "https://203.0.113.5/proxy/network/integration"
-    assert client._verify_ssl is True
-
-
-def test_client_connector_mode_base_url_ignores_verify_ssl_false():
-    client = UniFiClient("test-key", console_id="console-abc", verify_ssl=False)
+def test_client_connector_base_url():
+    client = UniFiClient("test-key", "console-abc")
     assert client._base_url == (
         "https://api.ui.com/v1/connector/consoles/console-abc/network/integration"
     )
-    # api.ui.com always has a real cert — connector mode never honors a
-    # request to skip verification, regardless of what direct mode allows.
-    assert client._verify_ssl is True
-
-
-@pytest.mark.parametrize("kwargs", [{}, {"host": "a", "console_id": "b"}])
-def test_client_requires_exactly_one_of_host_or_console_id(kwargs):
-    with pytest.raises(ValueError):
-        UniFiClient("test-key", **kwargs)
 
 
 @pytest.mark.asyncio

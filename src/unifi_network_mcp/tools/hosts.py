@@ -1,4 +1,4 @@
-"""Site Manager host discovery — read only, connector mode only.
+"""Site Manager host discovery — read only.
 
 GET https://api.ui.com/v1/hosts, per Ubiquiti's own Site Manager OpenAPI
 spec (developer.ui.com/site-manager/v1.0.0/openapi.json). Not yet exercised
@@ -20,10 +20,8 @@ def register(mcp: FastMCP, client_factory: Callable[[], UniFiClient | None]) -> 
     async def unifi_list_hosts() -> str:
         """List the consoles (hosts) this Site Manager account can see.
 
-        Connector-mode only — needs a Site Manager API key, not a local
-        console key. Use this to find the console_id for
-        X-Unifi-Console-Id, e.g. for an Official UniFi Hosting (SaaS)
-        console that has no address to give as X-Unifi-Host instead.
+        Use this to find the console_id for X-Unifi-Console-Id, e.g. for
+        an Official UniFi Hosting (SaaS) console.
         """
         client = client_factory()
         if client is None:

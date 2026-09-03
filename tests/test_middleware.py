@@ -1,6 +1,6 @@
-"""Gateway credential middleware tests: missing-header 401, exactly-one-of
-host/console-id enforcement, and header values correctly reaching the
-per-request contextvar (no global-state leakage across requests).
+"""Gateway credential middleware tests: missing-header 401, and header
+values correctly reaching the per-request contextvar (no global-state
+leakage across requests).
 """
 
 from starlette.testclient import TestClient
@@ -24,7 +24,7 @@ def test_health_is_local_and_does_not_require_credentials():
         assert resp.json() == {"status": "ok"}
 
 
-def test_missing_everything_returns_401_with_headers_explained():
+def test_missing_headers_returns_401_with_required_headers_listed():
     app, _ = _make_app()
     with TestClient(app) as client:
         resp = client.post(
@@ -34,11 +34,10 @@ def test_missing_everything_returns_401_with_headers_explained():
         )
         assert resp.status_code == 401
         body = resp.json()
-        assert body["required_headers"] == ["X-Unifi-Api-Key"]
-        assert body["required_headers_pick_one"] == ["X-Unifi-Host", "X-Unifi-Console-Id"]
+        assert body["required_headers"] == ["X-Unifi-Api-Key", "X-Unifi-Console-Id"]
 
 
-def test_api_key_without_host_or_console_id_returns_401():
+def test_missing_single_header_still_returns_401():
     app, _ = _make_app()
     with TestClient(app) as client:
         resp = client.post(
@@ -47,29 +46,17 @@ def test_api_key_without_host_or_console_id_returns_401():
             headers={
                 "Accept": "application/json, text/event-stream",
                 "X-Unifi-Api-Key": "test-key",
+                # X-Unifi-Console-Id intentionally omitted
             },
         )
         assert resp.status_code == 401
 
 
-def test_both_host_and_console_id_returns_401():
-    # Ambiguous — the middleware should refuse to guess which mode was meant.
-    app, _ = _make_app()
-    with TestClient(app) as client:
-        resp = client.post(
-            "/mcp",
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-            headers={
-                "Accept": "application/json, text/event-stream",
-                "X-Unifi-Api-Key": "test-key",
-                "X-Unifi-Host": "203.0.113.5",
-                "X-Unifi-Console-Id": "console-abc",
-            },
-        )
-        assert resp.status_code == 401
-
-
-def _run_middleware(headers: dict[bytes, bytes]):
+def test_header_present_reaches_request_context():
+    # Directly exercises the middleware's contextvar plumbing without a full
+    # MCP protocol round-trip: confirms the header values that arrive on the
+    # request are exactly what get_client_from_context sees, and that they
+    # are reset afterward (no leakage to the next request).
     import asyncio
 
     from unifi_network_mcp.server import GatewayTokenMiddleware, _gateway_creds_var
@@ -85,7 +72,14 @@ def _run_middleware(headers: dict[bytes, bytes]):
     middleware = GatewayTokenMiddleware(fake_app, settings)
 
     async def run():
-        scope = {"type": "http", "path": "/mcp", "headers": list(headers.items())}
+        scope = {
+            "type": "http",
+            "path": "/mcp",
+            "headers": [
+                (b"x-unifi-api-key", b"test-key-123"),
+                (b"x-unifi-console-id", b"console-abc"),
+            ],
+        }
 
         async def receive():
             return {"type": "http.request", "body": b"", "more_body": False}
@@ -96,40 +90,10 @@ def _run_middleware(headers: dict[bytes, bytes]):
         await middleware(scope, receive, send)
 
     asyncio.run(run())
-    left_over = _gateway_creds_var.get()
-    return seen["creds"], left_over
-
-
-def test_direct_mode_header_present_reaches_request_context():
-    # Directly exercises the middleware's contextvar plumbing without a full
-    # MCP protocol round-trip: confirms the header values that arrive on the
-    # request are exactly what get_client_from_context sees, and that they
-    # are reset afterward (no leakage to the next request).
-    creds, left_over = _run_middleware(
-        {b"x-unifi-host": b"203.0.113.5", b"x-unifi-api-key": b"test-key-123"}
-    )
-    assert creds == ("test-key-123", "203.0.113.5", None, True)
+    assert seen["creds"] == ("test-key-123", "console-abc")
     # After the request completes, the contextvar must be reset — a fresh
     # get() outside any request context sees no leftover credential.
-    assert left_over is None
-
-
-def test_connector_mode_header_present_reaches_request_context():
-    creds, _ = _run_middleware(
-        {b"x-unifi-console-id": b"console-abc", b"x-unifi-api-key": b"test-key-123"}
-    )
-    assert creds == ("test-key-123", None, "console-abc", True)
-
-
-def test_verify_ssl_header_false_disables_verification():
-    creds, _ = _run_middleware(
-        {
-            b"x-unifi-host": b"203.0.113.5",
-            b"x-unifi-api-key": b"test-key-123",
-            b"x-unifi-verify-ssl": b"false",
-        }
-    )
-    assert creds.verify_ssl is False
+    assert _gateway_creds_var.get() is None
 
 
 def test_client_factory_returns_none_without_context():

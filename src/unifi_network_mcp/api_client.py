@@ -1,33 +1,27 @@
-"""Client for Ubiquiti's official Network Integration API — reachable two
-ways, both wrapped by this one client:
+"""Client for Ubiquiti's official Network Integration API, reached through
+the **connector** path — this server calls Ubiquiti's own cloud
+(``https://api.ui.com/v1/connector/consoles/{console_id}/...``), which
+proxies the request to the console over Ubiquiti's own infrastructure. No
+customer network exposure needed at all: works for ANY console adopted to
+a UI.com account, including Official UniFi Hosting (OUH, Ubiquiti's own
+SaaS offering), which has no customer-reachable address to give us in the
+first place.
 
-- **Direct mode**: this server calls the console's own local API directly
-  (``https://{host}/proxy/network/integration/...``). Only works if the
-  console is network-reachable from wherever this server runs — for most
-  MSP customers that means the customer has deliberately exposed their
-  local controller to the internet. Only exists for self-hosted/hardware
-  consoles.
-- **Connector mode**: this server calls Ubiquiti's own cloud
-  (``https://api.ui.com/v1/connector/consoles/{console_id}/...``), which
-  proxies the request to the console over Ubiquiti's own infrastructure —
-  no customer network exposure needed at all. Works for ANY console
-  adopted to a UI.com account, self-hosted or Official UniFi Hosting
-  (OUH, Ubiquiti's own SaaS offering) alike — OUH consoles have no
-  customer-reachable address to give us in the first place, so connector
-  mode is the *only* way to reach one.
+(Direct mode — calling a self-hosted console's own local API address —
+was deliberately dropped: see README/CHANGELOG. Only the connector path is
+supported for now.)
 
-Endpoint shapes and the ``X-API-Key`` header for direct mode are taken from
-the official OpenAPI spec (UniFi Network API v10.0.162, mirrored at
-github.com/opastorello/unifi-api-docs) and cross-checked against a real
-third-party MCP's working implementation (github.com/sirkirby/unifi-mcp,
-packages/unifi-core/src/unifi_core/auth.py — same ``X-API-Key`` header,
-same ``/proxy/network/integration`` path prefix). Connector mode's shape
-(base URL, path structure, auth header, the exact example
+Endpoint shapes (base URL, path structure, auth header, the exact example
 ``GET /v1/connector/consoles/{id}/network/integration/v1/sites``,
 per-console rate limit of 100 req/min, 25s request timeout, 10MB response
-cap) is taken directly from Ubiquiti's own Site Manager OpenAPI spec
-(``developer.ui.com/site-manager/v1.0.0/openapi.json``). Neither mode has
-been exercised against a real live controller — see README Known Gaps.
+cap) are taken directly from Ubiquiti's own Site Manager OpenAPI spec
+(``developer.ui.com/site-manager/v1.0.0/openapi.json``). The underlying
+resource shapes (sites/devices/clients) are the same Network Integration
+API described in the UniFi Network API v10.0.162 spec (mirrored at
+github.com/opastorello/unifi-api-docs) — the connector is a transparent
+proxy to that same API, per Ubiquiti's own description ("proxied through
+api.ui.com... to the remote console at http://127.0.0.1/proxy/[path]").
+Never exercised against a real live account — see README Known Gaps.
 """
 
 import asyncio
@@ -42,31 +36,28 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _MAX_BACKOFF_SECONDS = 20.0
 
-_INTEGRATION_PATH_PREFIX = "/proxy/network/integration"
 _CONNECTOR_BASE = "https://api.ui.com"
 _SITE_MANAGER_HOSTS_URL = "https://api.ui.com/v1/hosts"
 
-# Two shared connection pools for the process lifetime, keyed by the only
-# per-tenant setting that must be baked into an httpx.Client at construction
-# time (verify=). No credentials are ever stored on either — the API key and
-# host are passed per-request (see server.py's contextvar-based credential
-# isolation), so sharing each pool across tenants/requests is safe: it holds
-# only TCP connections, never a request's auth material.
-_http_clients: dict[bool, httpx.AsyncClient] = {}
+# One shared connection pool for the process lifetime. No credentials are
+# ever stored on it — the API key is passed per-request (see server.py's
+# contextvar-based credential isolation), so sharing it across
+# tenants/requests is safe: it holds only TCP connections, never a
+# request's auth material. api.ui.com is Ubiquiti's own cloud with a real
+# CA-signed cert, so there is no per-tenant verify= setting to key on
+# (unlike a direct-to-console connection would need).
+_http_client: httpx.AsyncClient | None = None
 
 
-def _get_http_client(verify_ssl: bool) -> httpx.AsyncClient:
-    client = _http_clients.get(verify_ssl)
-    if client is None:
-        client = httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True, verify=verify_ssl)
-        _http_clients[verify_ssl] = client
-    return client
+def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True)
+    return _http_client
 
 
 # status_code -> (error code, retryable). status_code 0 means a network/
-# connection-level failure (no response at all) — the common case here,
-# since this server dials a customer-controlled, internet-exposed endpoint
-# that may simply be unreachable or mid-reboot.
+# connection-level failure (no response at all).
 _STATUS_TO_CODE: dict[int, tuple[str, bool]] = {
     0: ("upstream_error", True),
     400: ("invalid_argument", False),
@@ -97,60 +88,23 @@ class UniFiError(Exception):
         return error_envelope(code, self.message, retryable)
 
 
-def _normalize_base_url(host: str) -> str:
-    """A customer-provided controller address. Accept a bare host/IP
-    (optionally with a port) or a full URL, with or without a trailing
-    slash — mirrors the same real-world inconsistency handled for other
-    vendors in this fleet (e.g. datto-rmm-mcp's tenant_integration rows).
-    """
-    value = host.strip()
-    if value.startswith(("http://", "https://")):
-        return value.rstrip("/")
-    return f"https://{value.rstrip('/')}"
-
-
 class UniFiClient:
-    """Async httpx client wrapping Ubiquiti's Network Integration API, in
-    either direct or connector mode (see module docstring).
+    """Async httpx client wrapping Ubiquiti's Network Integration API via
+    the connector (cloud proxy) path.
 
-    Both modes authenticate with the same single stateless header
-    (``X-API-Key``) — no token exchange or session/cookie login involved —
-    but the key itself is a *different kind of credential* per mode: direct
-    mode wants a **local** API key generated on the console itself
-    (Settings > Control Plane > Integrations); connector mode wants a
-    **Site Manager** API key generated at unifi.ui.com > Settings > API
-    Keys. They are not interchangeable.
+    Auth is a single stateless header (``X-API-Key``) — no token exchange
+    or session/cookie login involved — but it must be a **Site Manager**
+    API key generated at unifi.ui.com > Settings > API Keys, not a local
+    console key (a local key has no meaning to api.ui.com and will 401).
 
-    Exactly one of ``host`` (direct mode) or ``console_id`` (connector
-    mode) must be given. Direct mode requires UniFi Network 9.x+ on a UniFi
-    OS console (the Integration API doesn't exist on older controllers or
-    the legacy self-hosted Network Application). Connector mode requires
-    console firmware >= 5.0.3 per Ubiquiti's own spec, and — for a
+    Requires console firmware >= 5.0.3 per Ubiquiti's own spec, and — for a
     non-organization Site Manager API key — only reaches consoles owned by
     that same UI.com account.
     """
 
-    def __init__(
-        self,
-        api_key: str,
-        host: str | None = None,
-        console_id: str | None = None,
-        verify_ssl: bool = True,
-    ):
-        if bool(host) == bool(console_id):
-            raise ValueError("UniFiClient needs exactly one of host or console_id")
+    def __init__(self, api_key: str, console_id: str):
         self._api_key = api_key
-        self._console_mode = console_id is not None
-        if self._console_mode:
-            self._base_url = f"{_CONNECTOR_BASE}/v1/connector/consoles/{console_id}/network/integration"
-            # api.ui.com is Ubiquiti's own cloud with a real CA-signed cert —
-            # never skip verification here regardless of what was asked for
-            # direct mode (that header only makes sense against a
-            # self-signed console cert on a customer's own address).
-            self._verify_ssl = True
-        else:
-            self._base_url = _normalize_base_url(host) + _INTEGRATION_PATH_PREFIX
-            self._verify_ssl = verify_ssl
+        self._base_url = f"{_CONNECTOR_BASE}/v1/connector/consoles/{console_id}/network/integration"
 
     def _clean_params(self, params: dict | None) -> dict:
         if not params:
@@ -165,20 +119,17 @@ class UniFiClient:
 
     async def list_hosts(self) -> Any:
         """The Site Manager `GET /v1/hosts` call — always against
-        api.ui.com regardless of this instance's own mode, since
-        discovering a console's host ID (needed for connector mode) is
-        itself always a Site-Manager-key operation. Only works with a Site
-        Manager API key, not a local console key.
+        api.ui.com regardless of which console this instance targets,
+        since discovering a console's host ID is itself a Site-Manager-key
+        operation independent of any one console.
         """
-        return await self._request_absolute("GET", _SITE_MANAGER_HOSTS_URL, verify_ssl=True)
+        return await self._request_absolute("GET", _SITE_MANAGER_HOSTS_URL)
 
     async def _request(
         self, method: str, path: str, params: dict | None = None, json_body: Any = None
     ) -> Any:
         url = f"{self._base_url}{path}"
-        return await self._request_absolute(
-            method, url, params=params, json_body=json_body, verify_ssl=self._verify_ssl
-        )
+        return await self._request_absolute(method, url, params=params, json_body=json_body)
 
     async def _request_absolute(
         self,
@@ -186,9 +137,8 @@ class UniFiClient:
         url: str,
         params: dict | None = None,
         json_body: Any = None,
-        verify_ssl: bool = True,
     ) -> Any:
-        client = _get_http_client(verify_ssl)
+        client = _get_http_client()
         params = self._clean_params(params)
 
         headers = {"X-API-Key": self._api_key, "Accept": "application/json"}
