@@ -1,12 +1,33 @@
-"""Client for Ubiquiti's official, local Network Integration API.
+"""Client for Ubiquiti's official Network Integration API — reachable two
+ways, both wrapped by this one client:
 
-Endpoint shapes and the ``X-API-Key`` header are taken from the official
-OpenAPI spec (UniFi Network API v10.0.162, mirrored at
+- **Direct mode**: this server calls the console's own local API directly
+  (``https://{host}/proxy/network/integration/...``). Only works if the
+  console is network-reachable from wherever this server runs — for most
+  MSP customers that means the customer has deliberately exposed their
+  local controller to the internet. Only exists for self-hosted/hardware
+  consoles.
+- **Connector mode**: this server calls Ubiquiti's own cloud
+  (``https://api.ui.com/v1/connector/consoles/{console_id}/...``), which
+  proxies the request to the console over Ubiquiti's own infrastructure —
+  no customer network exposure needed at all. Works for ANY console
+  adopted to a UI.com account, self-hosted or Official UniFi Hosting
+  (OUH, Ubiquiti's own SaaS offering) alike — OUH consoles have no
+  customer-reachable address to give us in the first place, so connector
+  mode is the *only* way to reach one.
+
+Endpoint shapes and the ``X-API-Key`` header for direct mode are taken from
+the official OpenAPI spec (UniFi Network API v10.0.162, mirrored at
 github.com/opastorello/unifi-api-docs) and cross-checked against a real
 third-party MCP's working implementation (github.com/sirkirby/unifi-mcp,
 packages/unifi-core/src/unifi_core/auth.py — same ``X-API-Key`` header,
-same ``/proxy/network/integration`` path prefix). This has NOT been
-exercised against a real live controller — see README Known Gaps.
+same ``/proxy/network/integration`` path prefix). Connector mode's shape
+(base URL, path structure, auth header, the exact example
+``GET /v1/connector/consoles/{id}/network/integration/v1/sites``,
+per-console rate limit of 100 req/min, 25s request timeout, 10MB response
+cap) is taken directly from Ubiquiti's own Site Manager OpenAPI spec
+(``developer.ui.com/site-manager/v1.0.0/openapi.json``). Neither mode has
+been exercised against a real live controller — see README Known Gaps.
 """
 
 import asyncio
@@ -22,6 +43,8 @@ _MAX_RETRIES = 3
 _MAX_BACKOFF_SECONDS = 20.0
 
 _INTEGRATION_PATH_PREFIX = "/proxy/network/integration"
+_CONNECTOR_BASE = "https://api.ui.com"
+_SITE_MANAGER_HOSTS_URL = "https://api.ui.com/v1/hosts"
 
 # Two shared connection pools for the process lifetime, keyed by the only
 # per-tenant setting that must be baked into an httpx.Client at construction
@@ -81,25 +104,53 @@ def _normalize_base_url(host: str) -> str:
     vendors in this fleet (e.g. datto-rmm-mcp's tenant_integration rows).
     """
     value = host.strip()
-    if value.startswith("http://") or value.startswith("https://"):
+    if value.startswith(("http://", "https://")):
         return value.rstrip("/")
     return f"https://{value.rstrip('/')}"
 
 
 class UniFiClient:
-    """Async httpx client wrapping Ubiquiti's local Network Integration API.
+    """Async httpx client wrapping Ubiquiti's Network Integration API, in
+    either direct or connector mode (see module docstring).
 
-    Takes the customer's controller host and local API key directly — this
-    API's auth is a single stateless header (``X-API-Key``), no token
-    exchange or session/cookie login involved. Requires UniFi Network 9.x+
-    on a UniFi OS console (the Integration API doesn't exist on older
-    controllers or the legacy self-hosted Network Application).
+    Both modes authenticate with the same single stateless header
+    (``X-API-Key``) — no token exchange or session/cookie login involved —
+    but the key itself is a *different kind of credential* per mode: direct
+    mode wants a **local** API key generated on the console itself
+    (Settings > Control Plane > Integrations); connector mode wants a
+    **Site Manager** API key generated at unifi.ui.com > Settings > API
+    Keys. They are not interchangeable.
+
+    Exactly one of ``host`` (direct mode) or ``console_id`` (connector
+    mode) must be given. Direct mode requires UniFi Network 9.x+ on a UniFi
+    OS console (the Integration API doesn't exist on older controllers or
+    the legacy self-hosted Network Application). Connector mode requires
+    console firmware >= 5.0.3 per Ubiquiti's own spec, and — for a
+    non-organization Site Manager API key — only reaches consoles owned by
+    that same UI.com account.
     """
 
-    def __init__(self, host: str, api_key: str, verify_ssl: bool = True):
+    def __init__(
+        self,
+        api_key: str,
+        host: str | None = None,
+        console_id: str | None = None,
+        verify_ssl: bool = True,
+    ):
+        if bool(host) == bool(console_id):
+            raise ValueError("UniFiClient needs exactly one of host or console_id")
         self._api_key = api_key
-        self._base_url = _normalize_base_url(host) + _INTEGRATION_PATH_PREFIX
-        self._verify_ssl = verify_ssl
+        self._console_mode = console_id is not None
+        if self._console_mode:
+            self._base_url = f"{_CONNECTOR_BASE}/v1/connector/consoles/{console_id}/network/integration"
+            # api.ui.com is Ubiquiti's own cloud with a real CA-signed cert —
+            # never skip verification here regardless of what was asked for
+            # direct mode (that header only makes sense against a
+            # self-signed console cert on a customer's own address).
+            self._verify_ssl = True
+        else:
+            self._base_url = _normalize_base_url(host) + _INTEGRATION_PATH_PREFIX
+            self._verify_ssl = verify_ssl
 
     def _clean_params(self, params: dict | None) -> dict:
         if not params:
@@ -112,11 +163,32 @@ class UniFiClient:
     async def post(self, path: str, json_body: Any = None) -> Any:
         return await self._request("POST", path, json_body=json_body)
 
+    async def list_hosts(self) -> Any:
+        """The Site Manager `GET /v1/hosts` call — always against
+        api.ui.com regardless of this instance's own mode, since
+        discovering a console's host ID (needed for connector mode) is
+        itself always a Site-Manager-key operation. Only works with a Site
+        Manager API key, not a local console key.
+        """
+        return await self._request_absolute("GET", _SITE_MANAGER_HOSTS_URL, verify_ssl=True)
+
     async def _request(
         self, method: str, path: str, params: dict | None = None, json_body: Any = None
     ) -> Any:
-        client = _get_http_client(self._verify_ssl)
         url = f"{self._base_url}{path}"
+        return await self._request_absolute(
+            method, url, params=params, json_body=json_body, verify_ssl=self._verify_ssl
+        )
+
+    async def _request_absolute(
+        self,
+        method: str,
+        url: str,
+        params: dict | None = None,
+        json_body: Any = None,
+        verify_ssl: bool = True,
+    ) -> Any:
+        client = _get_http_client(verify_ssl)
         params = self._clean_params(params)
 
         headers = {"X-API-Key": self._api_key, "Accept": "application/json"}

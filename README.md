@@ -1,30 +1,63 @@
 # unifi-network-mcp
 
-MCP server for **UniFi Network** (Ubiquiti's self-hosted routing/switching/
-Wi-Fi platform) — site, device, and client inventory, device statistics, and
+MCP server for **UniFi Network** (Ubiquiti's routing/switching/Wi-Fi
+platform) — site, device, and client inventory, device statistics, and
 device restart, over the [Model Context Protocol](https://modelcontextprotocol.io/)
 (Streamable HTTP/SSE transport), built directly against Ubiquiti's official
-local **Network Integration API**.
+**Network Integration API**.
 
 Built for [PRD-17725](https://app.clickup.com/t/2280862/PRD-17725) after an
 investigation of the community `sirkirby/unifi-mcp` project found it
 couldn't be adopted as-is under our gateway's per-tenant, stateless-header
 model (global-singleton credentials, refuses to start without one fixed
-controller at boot) — see Known Gaps for the full picture, including the one
-constraint no amount of engineering here removes.
+controller at boot) — see Known Gaps for the full picture.
 
-## ⚠️ Before you deploy this for a customer, read this
+## Two ways to reach a console — pick per customer
 
-UniFi Network has **no shared cloud instance** — every customer runs their
-own controller, and it normally lives on their own LAN behind NAT, which our
-cloud-hosted gateway cannot reach. **This server only works if the customer
-has deliberately exposed their controller's API to the internet.** That is
-a real security decision with a real cost (it puts a network-admin surface
-on the public internet), and it is the customer's call to make, not ours —
-see "Deployment precondition" below before offering this to anyone.
+UniFi has **no single shared cloud instance of the data** — every customer
+has their own console — but there are two distinct ways this server can
+reach one, selected by which headers the request carries:
+
+| | **Direct mode** | **Connector mode** |
+|---|---|---|
+| Use for | Self-hosted/hardware console the customer is willing to expose | Official UniFi Hosting (Ubiquiti's own SaaS) — or any console the customer won't expose |
+| Headers | `X-Unifi-Host` + `X-Unifi-Api-Key` | `X-Unifi-Console-Id` + `X-Unifi-Api-Key` |
+| `X-Unifi-Api-Key` is | A **local** key from the console itself | A **Site Manager** key from unifi.ui.com |
+| Request goes to | The console's own address, directly | `api.ui.com`, which proxies to the console |
+| Customer network exposure needed? | **Yes** — see the precondition below | **No** — this is the whole point |
+
+**Official UniFi Hosting (OUH) customers must use connector mode** — an OUH
+console runs inside Ubiquiti's own cloud and has no customer-reachable
+address to give as `X-Unifi-Host` in the first place. Connector mode also
+works for a self-hosted console that's adopted to a UI.com account, as an
+alternative to exposing it directly.
+
+## ⚠️ Direct mode's precondition: the console must be reachable from wherever this runs
+
+Direct mode calls the customer's own console directly — there is no
+proxy/relay layer. Three ways that can be true:
+
+1. **The customer exposes the console's API to the public internet**
+   (reverse proxy, port-forward, tunnel — their choice how). This is the
+   only path if the MCP gateway runs in our cloud and connector mode isn't
+   used instead. Recommend a reverse proxy with its own access control in
+   front, not a bare port-forward — the local API key alone is not enough
+   attack-surface reduction for an internet-facing admin interface.
+2. **This server runs inside the customer's own network** (e.g. as a
+   container next to their console) — avoids exposing anything, but means
+   a per-customer deployment instead of one shared gateway instance.
+3. **A site-to-site VPN / private link** between our infrastructure and the
+   customer's network — no public exposure, but real network engineering
+   per customer.
+
+This precondition is exactly why connector mode exists: for any customer
+unwilling or unable to do one of the above (which includes every OUH/SaaS
+customer by definition), connector mode reaches the same API with no
+exposure at all.
 
 ## When would you use this
 
+- "Which consoles can we see?" (connector mode only) → `unifi_list_hosts`
 - "What sites/devices/clients do we have on this customer's UniFi network?" → `unifi_list_sites`, `unifi_list_devices`, `unifi_list_clients`
 - "Look up this specific AP/switch/client" → `unifi_get_device`, `unifi_get_client`
 - "How's this device doing right now?" → `unifi_get_device_statistics`
@@ -36,42 +69,20 @@ server. Also out of scope in this first pass: firewall/ACL rules, networks
 (VLANs/WLANs), hotspot vouchers, VPN, RADIUS — all real endpoints on the
 official API (see Known Gaps) but not wrapped here yet.
 
-## Deployment precondition: the controller must be reachable from wherever this runs
-
-This server calls the customer's own controller directly — there is no
-proxy/relay layer. Three ways that can be true:
-
-1. **The customer exposes the controller's API to the public internet**
-   (reverse proxy, port-forward, tunnel — their choice how). This is the
-   only path if the MCP gateway runs in our cloud. Recommend a reverse
-   proxy with its own access control in front, not a bare port-forward —
-   the local API key alone is not enough attack-surface reduction for an
-   internet-facing admin interface.
-2. **This server runs inside the customer's own network** (e.g. as a
-   container next to their controller) — avoids exposing anything, but
-   means a per-customer deployment instead of one shared gateway instance.
-3. **A site-to-site VPN / private link** between our infrastructure and the
-   customer's network — no public exposure, but real network engineering
-   per customer.
-
-Path 1 is what PRD-17725's "customer is willing to expose the interface"
-scenario assumes. Whichever path is used, `X-Unifi-Host` must resolve to
-wherever the controller is actually reachable from — that's on whoever
-deploys this, not something this server can arrange.
-
 ## Tools
 
-授权需要 `X-Unifi-Host` / `X-Unifi-Api-Key` 两个请求头（见下方授权说明）。
+授权需要 `X-Unifi-Api-Key`，外加 `X-Unifi-Host` 或 `X-Unifi-Console-Id` 二选一（见下方授权说明）。
 
-| Tool | 功能 | 参数 |
-|---|---|---|
-| `unifi_list_sites` | 列出该 controller 管理的全部站点 | 无 |
-| `unifi_list_devices` | 列出某站点下的设备（AP/交换机/网关） | `site_id`(必填)、`offset`/`limit`/`filter_expr`(可选) |
-| `unifi_get_device` | 获取某设备详情 | `site_id`、`device_id`(均必填) |
-| `unifi_get_device_statistics` | 获取某设备最新性能指标 | `site_id`、`device_id`(均必填) |
-| `unifi_restart_device` | 立即重启指定设备——**破坏性、不可撤销** | `site_id`、`device_id`(均必填)、`confirm`(必填，必须为true) |
-| `unifi_list_clients` | 列出某站点下连接的客户端设备 | `site_id`(必填)、`offset`/`limit`/`filter_expr`(可选) |
-| `unifi_get_client` | 获取某客户端详情 | `site_id`、`client_id`(均必填) |
+| Tool | 功能 | 参数 | 模式 |
+|---|---|---|---|
+| `unifi_list_hosts` | 列出该 Site Manager 账号能看到的全部 console | 无 | 仅 connector 模式 |
+| `unifi_list_sites` | 列出该 controller 管理的全部站点 | 无 | 均可 |
+| `unifi_list_devices` | 列出某站点下的设备（AP/交换机/网关） | `site_id`(必填)、`offset`/`limit`/`filter_expr`(可选) | 均可 |
+| `unifi_get_device` | 获取某设备详情 | `site_id`、`device_id`(均必填) | 均可 |
+| `unifi_get_device_statistics` | 获取某设备最新性能指标 | `site_id`、`device_id`(均必填) | 均可 |
+| `unifi_restart_device` | 立即重启指定设备——**破坏性、不可撤销** | `site_id`、`device_id`(均必填)、`confirm`(必填，必须为true) | 均可 |
+| `unifi_list_clients` | 列出某站点下连接的客户端设备 | `site_id`(必填)、`offset`/`limit`/`filter_expr`(可选) | 均可 |
+| `unifi_get_client` | 获取某客户端详情 | `site_id`、`client_id`(均必填) | 均可 |
 
 ## Quick Start
 
@@ -101,18 +112,19 @@ No credentials are required for the health endpoint.
 
 ## 授权参数说明 (Authentication)
 
-Every request to `/mcp` must include the following HTTP headers (provided by the
-MCP caller/gateway):
+Every request to `/mcp` must include `X-Unifi-Api-Key`, plus **exactly one**
+of `X-Unifi-Host` or `X-Unifi-Console-Id` (provided by the MCP caller/gateway):
 
 | Header | 类型 | 是否必填 | 字段描述 |
 |---|---|---|---|
-| `X-Unifi-Host` | string | 必填 | 客户自己 UniFi controller 的地址（裸 host/IP 或带端口，或完整 URL）——必须是从本服务运行的地方能访问到的地址，见上方"Deployment precondition"。 |
-| `X-Unifi-Api-Key` | string | 必填 | 在客户 controller 里生成的本地 API Key（Settings → Control Plane → Integrations → Create New API Key）。不要用客户的 admin 账号密码——本地 API Key 是独立、可单独吊销的凭据，也是本服务唯一接受的认证方式。 |
-| `X-Unifi-Verify-Ssl` | string | 可选，默认 `true` | 仅当 controller 用自签名证书时设为 `false`——不建议，因为请求现在是走公网而不是局域网，跳过证书校验有真实的中间人风险；更好的做法是让暴露出来的那一层带上有效证书。 |
+| `X-Unifi-Api-Key` | string | 必填 | 见下方——具体是哪种 API Key，取决于用的是 direct 还是 connector 模式，两者不能混用。 |
+| `X-Unifi-Host` | string | 二选一（direct 模式） | 客户自己 UniFi console 的地址（裸 host/IP 或带端口，或完整 URL）——必须是从本服务运行的地方能访问到的地址，见上方"Direct mode's precondition"。此时 `X-Unifi-Api-Key` 必须是在这台 console 里生成的**本地** API Key（Settings → Control Plane → Integrations → Create New API Key）。 |
+| `X-Unifi-Console-Id` | string | 二选一（connector 模式） | 客户 console 在 Site Manager 里的 host ID——用 `unifi_list_hosts` 查。此时 `X-Unifi-Api-Key` 必须是 unifi.ui.com → Settings → API Keys 生成的 **Site Manager** API Key，不能用本地 console 的 API Key。**OUH（官方 SaaS 托管）客户必须用这个模式**，因为它们的 console 根本没有客户能拿到的地址。 |
+| `X-Unifi-Verify-Ssl` | string | 可选，默认 `true`，仅 direct 模式生效 | 仅当 console 用自签名证书时设为 `false`——不建议，因为请求现在是走公网而不是局域网，跳过证书校验有真实的中间人风险；更好的做法是让暴露出来的那一层带上有效证书。connector 模式下始终忽略此项（`api.ui.com` 一直是正规签发的证书）。 |
 
-Missing either required header returns `401 Unauthorized`.
+不要用客户的 admin 账号密码代替任一种 API Key——两种 API Key 都是独立、可单独吊销的凭据，也是本服务唯一接受的认证方式。缺少 `X-Unifi-Api-Key`，或 `X-Unifi-Host`/`X-Unifi-Console-Id` 一个都没给 / 两个都给了，均返回 `401 Unauthorized`。
 
-**认证机制**：这个 API（Ubiquiti 官方的 "Network Integration API"）本身就是无状态的单头认证——收到 `X-Unifi-Api-Key` 后原样透传给 controller 的 `X-API-Key` header，没有 token 交换或 session/cookie 登录这一步。凭据只在一次请求的生命周期内持有，从不缓存。
+**认证机制**：这个 API（Ubiquiti 官方的 "Network Integration API"）本身就是无状态的单头认证——不管走哪种模式，收到的 API Key 都原样透传为上游的 `X-API-Key` header，没有 token 交换或 session/cookie 登录这一步。凭据只在一次请求的生命周期内持有，从不缓存。两种模式唯一的区别是请求打到哪：direct 模式直接打客户 console 自己的地址；connector 模式打 `https://api.ui.com/v1/connector/consoles/{console_id}/network/integration/...`，由 Ubiquiti 自己的云转发到 console——这条路径已经用假 Key 实际跑通过（见 Known Gaps），确认走的是真请求、真响应，不是猜的。
 
 ## Environment Variables
 
@@ -129,15 +141,17 @@ POST http://localhost:8080/mcp
 
 Connect your MCP client with:
 - Transport: `http` (Streamable HTTP / SSE)
-- Headers: `X-Unifi-Host`, `X-Unifi-Api-Key` (both required), `X-Unifi-Verify-Ssl` (optional)
+- Headers: `X-Unifi-Api-Key` (required) + exactly one of `X-Unifi-Host` / `X-Unifi-Console-Id`, `X-Unifi-Verify-Ssl` (optional, direct mode only)
 
 ## 测试示例 (Test Example)
+
+Direct mode:
 
 ```bash
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "X-Unifi-Host: <customer-exposed-controller-address>" \
+  -H "X-Unifi-Host: <customer-exposed-console-address>" \
   -H "X-Unifi-Api-Key: <local-api-key>" \
   -d '{
     "jsonrpc": "2.0",
@@ -147,12 +161,28 @@ curl -X POST http://localhost:8080/mcp \
   }'
 ```
 
-> ⚠️ 本仓库为公开仓库，请勿在任何提交的文件中写入真实的客户 controller 地址/API Key，
+Connector mode (SaaS / OUH, or any console the customer won't expose):
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "X-Unifi-Console-Id: <console-host-id-from-unifi_list_hosts>" \
+  -H "X-Unifi-Api-Key: <site-manager-api-key>" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": { "name": "unifi_list_sites", "arguments": {} }
+  }'
+```
+
+> ⚠️ 本仓库为公开仓库，请勿在任何提交的文件中写入真实的客户 console 地址/API Key，
 > 上面的占位符仅为示意。
 
 ## Known Gaps
 
-- **Nothing here has been exercised against a real live controller.**
+- **Direct mode has never been exercised against a real live controller.**
   Unlike this fleet's other recent vendor-mcps (datto-rmm-mcp, easydmarc-mcp),
   we had no test/trial UniFi account or exposed controller to call against —
   every endpoint's request/response shape below comes from Ubiquiti's own
@@ -165,6 +195,34 @@ curl -X POST http://localhost:8080/mcp \
   uses, confirmed by reading that repo's source directly, not assumed).
   **Test this for real (a customer's exposed controller, or a lab UniFi
   device) before treating this as production-ready.**
+- **Connector mode's URL shape IS confirmed against real Ubiquiti
+  infrastructure — added 2026-09-03, more verified than direct mode.**
+  Both `GET https://api.ui.com/v1/hosts` (`unifi_list_hosts`) and
+  `GET https://api.ui.com/v1/connector/consoles/{id}/network/integration/v1/sites`
+  were called for real with a dummy key while running this server locally,
+  and both came back with a genuine `401 Unauthorized` from Ubiquiti's own
+  API (confirmed in this server's own httpx request log) — not a 404 or a
+  connection failure, which is what a wrong path/host would produce. The
+  base URL, path structure (no `/proxy/` segment — that's implicit server-
+  side per Ubiquiti's own spec, unlike direct mode's explicit
+  `/proxy/network/integration` prefix), and `X-API-Key` header all come
+  from Ubiquiti's own Site Manager OpenAPI spec
+  (`developer.ui.com/site-manager/v1.0.0/openapi.json`), not guessed.
+  **Still unconfirmed**: the success path (a real Site Manager key actually
+  returning host/site data), and whether an Official UniFi Hosting console
+  specifically behaves identically to a self-hosted one through this same
+  proxy — no OUH account was available to test with.
+- **Connector mode's stated limits are taken as documented, not tested**:
+  per-console rate limit of 100 requests/minute, 25-second upstream request
+  timeout, 10MB response body cap. A large fleet or a slow console response
+  could plausibly hit these in ways this server doesn't specially handle
+  beyond its normal retry logic.
+- **Non-organization vs. organization Site Manager API keys behave
+  differently per Ubiquiti's own docs** ("non-organization API keys:
+  limited to API key owner's consoles only; organization API keys: can
+  access any console within the organization") — this server has no
+  awareness of that distinction; it's purely a property of which kind of
+  key the customer generates and hands over.
 - **Version requirement, not yet verified against a real console**: per
   Ubiquiti's own documentation, the Network Integration API requires
   UniFi Network 9.x+ on a UniFi OS console or UniFi OS Server — it does not
@@ -214,15 +272,11 @@ curl -X POST http://localhost:8080/mcp \
   verified.** The spec documents `offset` default 0, `limit` default 25 /
   max 200 for the list endpoints — taken as given, not smoke-tested against
   a real large fleet.
-- **Cloud-connector proxy path not implemented.** Ubiquiti also documents
-  reaching this same Integration API via `api.ui.com`'s connector proxy
-  (`https://api.ui.com/v1/connector/consoles/{consoleId}/proxy/network/integration/v1/...`),
-  which would avoid the "customer must expose their controller" precondition
-  entirely for any console already adopted to a UI.com account. This wasn't
-  explored deeply enough in this investigation to build against — worth
-  evaluating before asking any customer to expose their controller, since it
-  may remove the need for that entirely. See also the narrower, already-cloud
-  **Site Manager API** (`unifi.ui.com`) discussed on PRD-17725 for read-only
-  cross-site visibility without this precondition at all, at the cost of a
-  much smaller endpoint surface (sites/devices/ISP metrics only, no clients,
-  no restart).
+- **A separate, narrower, already-cloud "Site Manager API"** (plain
+  `unifi.ui.com`/`api.ui.com` endpoints like `/v1/sites`, `/v1/devices`,
+  `/v1/isp-metrics` — not the connector-proxy path this server uses) also
+  exists and was discussed on PRD-17725, for read-only cross-site
+  visibility at the cost of a much smaller endpoint surface (no clients, no
+  restart, no per-console Integration API access). Not used here — this
+  server's connector mode reaches the full Integration API via the proxy
+  instead, which is strictly more capable when it's available.
