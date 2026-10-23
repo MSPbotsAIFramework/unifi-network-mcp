@@ -121,18 +121,18 @@ are out of scope for now too (see Known Gaps).
 
 ## Tools
 
-授权需要 `X-Unifi-Api-Key` / `X-Unifi-Console-Id` 两个请求头（见下方授权说明）。
+Authorization requires the two request headers `X-Unifi-Api-Key` / `X-Unifi-Console-Id` (see the authentication notes below).
 
-| Tool | 功能 | 参数 |
+| Tool | Description | Parameters |
 |---|---|---|
-| `unifi_list_hosts` | 列出该 Site Manager 账号能看到的全部 console | 无 |
-| `unifi_list_sites` | 列出该 console 管理的全部站点 | 无 |
-| `unifi_list_devices` | 列出某站点下的设备（AP/交换机/网关） | `site_id`(必填)、`offset`/`limit`/`filter_expr`(可选) |
-| `unifi_get_device` | 获取某设备详情 | `site_id`、`device_id`(均必填) |
-| `unifi_get_device_statistics` | 获取某设备最新性能指标 | `site_id`、`device_id`(均必填) |
-| `unifi_restart_device` | 立即重启指定设备——**破坏性、不可撤销** | `site_id`、`device_id`(均必填)、`confirm`(必填，必须为true) |
-| `unifi_list_clients` | 列出某站点下连接的客户端设备 | `site_id`(必填)、`offset`/`limit`/`filter_expr`(可选) |
-| `unifi_get_client` | 获取某客户端详情 | `site_id`、`client_id`(均必填) |
+| `unifi_list_hosts` | List all consoles visible to this Site Manager account | None |
+| `unifi_list_sites` | List all sites managed by this console | None |
+| `unifi_list_devices` | List the devices (AP/switch/gateway) under a site | `site_id` (required), `offset`/`limit`/`filter_expr` (optional) |
+| `unifi_get_device` | Get details of a device | `site_id`, `device_id` (both required) |
+| `unifi_get_device_statistics` | Get the latest performance metrics of a device | `site_id`, `device_id` (both required) |
+| `unifi_restart_device` | Restart the specified device immediately - **destructive and irreversible** | `site_id`, `device_id` (both required), `confirm` (required, must be true) |
+| `unifi_list_clients` | List the client devices connected under a site | `site_id` (required), `offset`/`limit`/`filter_expr` (optional) |
+| `unifi_get_client` | Get details of a client | `site_id`, `client_id` (both required) |
 
 ## Quick Start
 
@@ -160,19 +160,19 @@ curl http://localhost:8080/health
 
 No credentials are required for the health endpoint.
 
-## 授权参数说明 (Authentication)
+## Authentication Parameters (Authentication)
 
 Every request to `/mcp` must include the following HTTP headers (provided by
 the MCP caller/gateway):
 
-| Header | 类型 | 是否必填 | 字段描述 |
+| Header | Type | Required | Description |
 |---|---|---|---|
-| `X-Unifi-Api-Key` | string | 必填 | **Site Manager** API Key，在 unifi.ui.com → Settings → API Keys 生成——不是客户 console 本地生成的 API Key，两者不通用，用错了会 401。 |
-| `X-Unifi-Console-Id` | string | 必填 | 目标 console 在 Site Manager 里的 host ID，用 `unifi_list_hosts` 查。 |
+| `X-Unifi-Api-Key` | string | Yes | **Site Manager** API Key, generated at unifi.ui.com → Settings → API Keys - not an API Key generated locally on the customer's console; the two are not interchangeable, and using the wrong one returns 401. |
+| `X-Unifi-Console-Id` | string | Yes | The host ID of the target console in Site Manager; look it up with `unifi_list_hosts`. |
 
-不要用客户的 admin 账号密码代替 API Key——Site Manager API Key 是独立、可单独吊销的凭据，也是本服务唯一接受的认证方式。缺少任一 header 均返回 `401 Unauthorized`。
+Do not use the customer's admin account password in place of the API Key - the Site Manager API Key is an independent credential that can be revoked separately, and it is the only authentication method this service accepts. Missing either header returns `401 Unauthorized`.
 
-**认证机制**：这个 API（Ubiquiti 官方的 "Network Integration API"）本身就是无状态的单头认证——收到的 `X-Unifi-Api-Key` 原样透传为上游的 `X-API-Key` header，没有 token 交换或 session/cookie 登录这一步。凭据只在一次请求的生命周期内持有，从不缓存。请求实际打到 `https://api.ui.com/v1/connector/consoles/{console_id}/network/integration/...`，由 Ubiquiti 自己的云转发到 console——这条路径已经用假 Key 实际跑通过（见 Known Gaps），确认走的是真请求、真响应，不是猜的。
+**Authentication mechanism**: this API (Ubiquiti's official "Network Integration API") is itself stateless single-header authentication - the received `X-Unifi-Api-Key` is passed through as-is as the upstream `X-API-Key` header, with no token exchange or session/cookie login step. Credentials are held only for the lifetime of a single request and never cached. Requests actually go to `https://api.ui.com/v1/connector/consoles/{console_id}/network/integration/...`, and Ubiquiti's own cloud forwards them to the console - this path has been run end-to-end with a fake key (see Known Gaps), confirming that it is a real request and a real response, not a guess.
 
 ## Environment Variables
 
@@ -191,7 +191,7 @@ Connect your MCP client with:
 - Transport: `http` (Streamable HTTP / SSE)
 - Headers: `X-Unifi-Api-Key`, `X-Unifi-Console-Id` (both required)
 
-## 测试示例 (Test Example)
+## Test Example (Test Example)
 
 ```bash
 curl -X POST http://localhost:8080/mcp \
@@ -207,8 +207,8 @@ curl -X POST http://localhost:8080/mcp \
   }'
 ```
 
-> ⚠️ 本仓库为公开仓库，请勿在任何提交的文件中写入真实的客户 API Key/console ID，
-> 上面的占位符仅为示意。
+> ⚠️ This repository is public; do not write real customer API Keys/console IDs into any committed file,
+> the placeholders above are for illustration only.
 
 ## Known Gaps
 
