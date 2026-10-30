@@ -3,6 +3,10 @@ values correctly reaching the per-request contextvar (no global-state
 leakage across requests).
 """
 
+import asyncio
+import json
+
+import pytest
 from starlette.testclient import TestClient
 
 from unifi_network_mcp.__main__ import _build_http_app
@@ -99,3 +103,97 @@ def test_header_present_reaches_request_context():
 def test_client_factory_returns_none_without_context():
     settings = Settings()
     assert get_client_from_context(settings) is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_cannot_see_each_others_console_devices():
+    """TC-UNF-108 / AC6 (PRD-21266): two concurrent requests presenting two
+    different X-Unifi-Api-Key / X-Unifi-Console-Id header pairs must never
+    mix devices, exercised through the real middleware -> contextvar ->
+    UniFiClient-per-request path every tool goes through (api_client.py's
+    console_id is baked into the client's base_url at construction,
+    api_client.py:105-107) -- not asserted from documentation. Mirrors
+    test_header_present_reaches_request_context's directness, but runs two
+    requests through asyncio.gather so the contextvar copy-per-Task
+    behaviour this module's docstring claims is actually exercised, not
+    just stated.
+    """
+    import unifi_network_mcp.api_client as api_client_mod
+    from unifi_network_mcp.server import GatewayTokenMiddleware
+    from unifi_network_mcp.tools import alerts
+    from mcp.server.fastmcp import FastMCP
+
+    settings = Settings()
+    mcp = FastMCP(name="test")
+    alerts.register(mcp, lambda: get_client_from_context(settings))
+
+    async def fake_get(self, path, params=None):
+        # Yield control so the two concurrent calls below actually
+        # interleave instead of running start-to-finish back to back.
+        await asyncio.sleep(0)
+        console_id = self._base_url.rsplit("/consoles/", 1)[1].split("/", 1)[0]
+        device_id = f"device-of-{console_id}"
+        return {
+            "data": [
+                {
+                    "id": device_id,
+                    "name": device_id,
+                    "model": "M",
+                    "macAddress": device_id,
+                    "state": "OFFLINE",
+                    "firmwareUpdatable": False,
+                }
+            ],
+            "count": 1,
+            "limit": 200,
+            "offset": 0,
+            "totalCount": 1,
+        }
+
+    original_get = api_client_mod.UniFiClient.get
+    api_client_mod.UniFiClient.get = fake_get
+    results: dict[str, str] = {}
+    try:
+
+        async def call_as(console_id: str, api_key: str) -> None:
+            async def app(scope, receive, send):
+                tool_result = await mcp.call_tool("unifi_list_device_issues", {"site_id": "s1"})
+                text = (
+                    tool_result[0][0].text
+                    if isinstance(tool_result, tuple)
+                    else str(tool_result)
+                )
+                results[console_id] = text
+
+            middleware = GatewayTokenMiddleware(app, settings)
+            scope = {
+                "type": "http",
+                "path": "/mcp",
+                "headers": [
+                    (b"x-unifi-api-key", api_key.encode()),
+                    (b"x-unifi-console-id", console_id.encode()),
+                ],
+            }
+
+            async def receive():
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+            async def send(message):
+                pass
+
+            await middleware(scope, receive, send)
+
+        await asyncio.gather(
+            call_as("console-a", "key-a"),
+            call_as("console-b", "key-b"),
+        )
+
+        body_a = json.loads(results["console-a"])
+        body_b = json.loads(results["console-b"])
+        ids_a = {issue["device_id"] for issue in body_a["issues"]}
+        ids_b = {issue["device_id"] for issue in body_b["issues"]}
+        assert ids_a == {"device-of-console-a"}
+        assert ids_b == {"device-of-console-b"}
+        assert ids_a.isdisjoint(ids_b)
+    finally:
+        api_client_mod.UniFiClient.get = original_get
