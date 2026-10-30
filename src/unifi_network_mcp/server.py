@@ -114,7 +114,10 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             "find a device_id/client_id; unifi_get_device / "
             "unifi_get_device_statistics for detail; unifi_restart_device to "
             "reboot a device right now (destructive, irreversible — requires "
-            "confirm=true). This covers Network only, not Protect (cameras) "
+            "confirm=true); unifi_list_device_issues for a derived view of "
+            "devices that are offline, mid-transition, or have a firmware "
+            "update available (there is no alert/alarm endpoint in "
+            "Ubiquiti's official API). This covers Network only, not Protect (cameras) "
             "or Access (door control) — those are separate controllers with "
             "their own APIs, not wrapped by this server."
         ),
@@ -125,11 +128,12 @@ def create_mcp_server(settings: Settings) -> FastMCP:
 
     client_factory: Callable[[], UniFiClient | None] = lambda: get_client_from_context(settings)
 
-    from .tools import clients, devices, hosts, sites
+    from .tools import alerts, clients, devices, hosts, sites
 
     hosts.register(mcp, client_factory)
     sites.register(mcp, client_factory)
     devices.register(mcp, client_factory)
     clients.register(mcp, client_factory)
+    alerts.register(mcp, client_factory)
 
     return mcp

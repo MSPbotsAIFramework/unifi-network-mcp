@@ -1,0 +1,58 @@
+[
+  {
+    "id": "TC-UNF-101",
+    "ac": "AC1",
+    "type": "auto",
+    "text": "Given a site with one ONLINE, one OFFLINE, and one UPDATING device, when unifi_list_device_issues is called, then issues contains exactly the OFFLINE device (tagged offline) and the UPDATING device (tagged transitioning), and excludes the ONLINE device",
+    "tests": ["tests/test_tools.py::test_device_issues_filters_and_tags_non_online_devices"]
+  },
+  {
+    "id": "TC-UNF-102",
+    "ac": "AC1",
+    "type": "auto",
+    "text": "Given a device that is both OFFLINE and has firmwareUpdatable: true, when the tool is called, then that device's issue_types contains both offline and firmware_update_available",
+    "tests": ["tests/test_tools.py::test_device_issues_tags_offline_and_firmware_together"]
+  },
+  {
+    "id": "TC-UNF-103",
+    "ac": "AC2",
+    "type": "auto",
+    "text": "Given a site where every device is ONLINE with firmwareUpdatable: false, when the tool is called, then it returns issues: [] with a normal success response, not an error",
+    "tests": ["tests/test_tools.py::test_device_issues_empty_list_when_all_devices_healthy"]
+  },
+  {
+    "id": "TC-UNF-104",
+    "ac": "AC3",
+    "type": "auto",
+    "text": "Given a site_id the upstream API does not recognize, when the tool is called, then it returns the same structured error envelope (not_found or invalid_argument) unifi_list_devices would return for the same bad site_id, not an unhandled exception",
+    "tests": ["tests/test_tools.py::test_device_issues_unknown_site_returns_structured_error"]
+  },
+  {
+    "id": "TC-UNF-105",
+    "ac": "AC4",
+    "type": "auto",
+    "text": "Given a request to unifi_list_device_issues with the X-Unifi-Api-Key / X-Unifi-Console-Id headers missing, when the tool is called, then it returns the exact NO_TOKEN error envelope every other tool returns in the same situation",
+    "tests": ["tests/test_tools.py::test_device_issues_no_credentials_returns_not_configured"]
+  },
+  {
+    "id": "TC-UNF-106",
+    "ac": "AC5",
+    "type": "auto",
+    "text": "Given a site with 260 devices (upstream page size 200), when the tool is called with the default max_devices, then issues reflects devices from both upstream pages, scanned equals 260, and truncated is false",
+    "tests": ["tests/test_tools.py::test_device_issues_scans_past_first_page_without_truncating"]
+  },
+  {
+    "id": "TC-UNF-107",
+    "ac": "AC5",
+    "type": "auto",
+    "text": "Given a site with 900 devices and max_devices=500 (default), when the tool is called, then scanned equals 500, truncated is true, and the tool does not error or hang",
+    "tests": ["tests/test_tools.py::test_device_issues_stops_at_max_devices_and_reports_truncated"]
+  },
+  {
+    "id": "TC-UNF-108",
+    "ac": "AC6",
+    "type": "auto",
+    "text": "Given two concurrent calls to unifi_list_device_issues using two different X-Unifi-Api-Key/X-Unifi-Console-Id header pairs pointing at two different consoles, when both run concurrently, then each caller's issues only contains devices from its own console, verified at the header/credential level",
+    "tests": ["tests/test_middleware.py::test_concurrent_requests_cannot_see_each_others_console_devices"]
+  }
+]

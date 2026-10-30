@@ -110,6 +110,7 @@ directly.
 - "Look up this specific AP/switch/client" → `unifi_get_device`, `unifi_get_client`
 - "How's this device doing right now?" → `unifi_get_device_statistics`
 - "Restart this device" → `unifi_restart_device` (⚠️ destructive, drops every client behind it)
+- "What's currently wrong on this site?" → `unifi_list_device_issues` (offline/interrupted devices, devices stuck mid-adoption/mid-update, firmware updates available — a derived view, see Known Gaps)
 
 **Not covered**: UniFi Protect (cameras) and UniFi Access (door control) are
 separate controllers with their own local APIs — out of scope for this
@@ -133,6 +134,7 @@ Authorization requires the two request headers `X-Unifi-Api-Key` / `X-Unifi-Cons
 | `unifi_restart_device` | Restart the specified device immediately - **destructive and irreversible** | `site_id`, `device_id` (both required), `confirm` (required, must be true) |
 | `unifi_list_clients` | List the client devices connected under a site | `site_id` (required), `offset`/`limit`/`filter_expr` (optional) |
 | `unifi_get_client` | Get details of a client | `site_id`, `client_id` (both required) |
+| `unifi_list_device_issues` | List devices on a site that are offline/interrupted, stuck mid-transition, or have a firmware update available — a derived "what's wrong" view, not a native alerts feed (see Known Gaps) | `site_id` (required), `max_devices` (optional, default 500) |
 
 ## Quick Start
 
@@ -307,3 +309,16 @@ curl -X POST http://localhost:8080/mcp \
   restart, no per-console Integration API access). Not used here — this
   server's connector reaches the full Integration API via the proxy
   instead, which is strictly more capable when it's available.
+- **`unifi_list_device_issues` is a derived view, not a native alerts
+  feed.** Neither of Ubiquiti's two official REST specs this server is
+  scoped to (Site Manager API v1.0.0, Network Integration API v11.0.97)
+  exposes an alert/alarm resource — confirmed by searching both published
+  `openapi.json` documents for "alert"/"alarm" (zero hits, checked
+  2026-10-30). This tool instead flags devices whose documented `state` is
+  not `ONLINE` or whose `firmwareUpdatable` is true, reusing the same
+  `/v1/sites/{siteId}/devices` call `unifi_list_devices` already makes. It
+  does not cover WAN/ISP-level outages (`/v1/isp-metrics`, a different,
+  account-wide Site Manager resource) and has no acknowledge/snooze/resolve
+  workflow, since there is no backing API state to mutate. See
+  [PRD-21266](https://app.clickup.com/t/86e3v6wgv) for the full
+  investigation.
