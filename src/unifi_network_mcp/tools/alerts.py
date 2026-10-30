@@ -65,12 +65,9 @@ def register(mcp: FastMCP, client_factory: Callable[[], UniFiClient | None]) -> 
 
         There is no alert/alarm endpoint in Ubiquiti's official API (see
         README Known Gaps) -- this derives "issues" from the same
-        state/firmware fields unifi_list_devices already returns: offline
-        or interrupted devices, devices stuck mid-adoption/mid-update/
-        mid-deletion, devices reporting a topology warning, and devices
-        with a firmware update available. Use unifi_list_devices for the
-        full inventory; use this when you just want "what's currently
-        wrong" on a site.
+        state/firmware fields unifi_list_devices already returns. Use
+        unifi_list_devices for the full inventory; use this when you just
+        want "what's currently wrong" on a site.
         """
         client = client_factory()
         if client is None:
